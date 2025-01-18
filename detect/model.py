@@ -1,149 +1,133 @@
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logs
 
-# Suppress TensorFlow logs to minimize console clutter
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model, load_model
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, GlobalAveragePooling2D
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.optimizers import Adam, AdamW
+from tensorflow.keras.applications import EfficientNetB0  # Pre-trained model
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler
+import matplotlib.pyplot as plt
+from math import ceil
+import numpy as np
 
-import matplotlib.pyplot as plt  # For plotting training/validation accuracy and loss
-from math import ceil  # For calculating the number of steps per epoch
-import tensorflow as tf  # For TensorFlow and Keras functionality
-from tensorflow.keras.preprocessing.image import ImageDataGenerator  # For image data generators
-from tensorflow.keras.models import Sequential, load_model  # For defining and loading the model
-from tensorflow.keras.layers import Dense, Flatten, Dropout, BatchNormalization, Conv2D, MaxPooling2D, Input  # Layers for the CNN
-from tensorflow.keras.optimizers import Adam  # Optimizer for model training
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau  # Callbacks for training
+# Paths for training and validation data
+train_dir = "t_data/train"
+val_dir = "t_data/test"
 
-# Directories for training and validation datasets
-train_dir = "t_data/train"  # Path to training data
-val_dir = "t_data/test"     # Path to validation data
-
-# Check if directories exist and are not empty
+# Ensure data directories exist
 if not os.path.exists(train_dir) or len(os.listdir(train_dir)) == 0:
     raise FileNotFoundError(f"Training directory is missing or empty: {train_dir}")
 if not os.path.exists(val_dir) or len(os.listdir(val_dir)) == 0:
     raise FileNotFoundError(f"Validation directory is missing or empty: {val_dir}")
 
-# Data preprocessing and augmentation
-image_generator = ImageDataGenerator(
-    rescale=1.0 / 255,       # Normalize pixel values
-    shear_range=0.2,         # Shear transformations
-    zoom_range=0.2,          # Random zoom
-    horizontal_flip=True,    # Random horizontal flips
-    validation_split=0.2     # Split data into training and validation sets
+# Data augmentation and preprocessing
+image_gen = ImageDataGenerator(
+    rescale=1.0 / 255,  # Normalize pixel values
+    rotation_range=40,  # Rotate images up to 40 degrees
+    width_shift_range=0.2,  # Shift images horizontally
+    height_shift_range=0.2,  # Shift images vertically
+    shear_range=0.2,  # Shear transformations
+    zoom_range=0.2,  # Random zoom
+    horizontal_flip=True,  # Random horizontal flips
+    fill_mode='nearest'  # Fill missing pixels with nearest values
 )
 
-# Training data generator
-train_data_gen = image_generator.flow_from_directory(
+# Load training data
+train_data_gen = image_gen.flow_from_directory(
     train_dir,
-    target_size=(150, 150),  # Resize all images to 150x150
-    batch_size=32,          # Number of samples per batch
-    class_mode='categorical', # Categorical labels for multi-class classification
-    subset='training'        # Training subset
-)
-
-# Validation data generator
-val_data_gen = image_generator.flow_from_directory(
-    train_dir,               # Use training directory for validation split
-    target_size=(150, 150),
+    target_size=(224, 224),  # Resize images to 224x224 for EfficientNet
     batch_size=32,
-    class_mode='categorical',
-    subset='validation'      # Validation subset
+    class_mode='categorical'
 )
 
-# Define the CNN model
+# Load validation data
+val_data_gen = image_gen.flow_from_directory(
+    val_dir,
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical'
+)
+
+# Build the model using EfficientNetB0 as the base
 def build_model():
+    # Load EfficientNetB0 without the top layer (pre-trained on ImageNet)
+    base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+    
+    # Freeze base model layers to retain pre-trained features
+    base_model.trainable = False
+    
+    # Add custom classification layers
     model = Sequential([
-        Input(shape=(150, 150, 3)),              # Input layer
-        Conv2D(32, (3, 3), activation='relu'),   # Convolutional layer
-        MaxPooling2D((2, 2)),                   # Max pooling layer
-        Conv2D(64, (3, 3), activation='relu'),   # Convolutional layer
-        MaxPooling2D((2, 2)),                   # Max pooling layer
-        Conv2D(128, (3, 3), activation='relu'),  # Convolutional layer
-        MaxPooling2D((2, 2)),                   # Max pooling layer
-        Flatten(),                              # Flatten for dense layers
-        Dense(256, activation='relu'),          # Fully connected layer
-        BatchNormalization(),                   # Batch normalization
-        Dropout(0.5),                           # Dropout for regularization
-        Dense(128, activation='relu'),          # Fully connected layer
-        BatchNormalization(),                   # Batch normalization
-        Dropout(0.3),                           # Dropout for regularization
+        base_model,
+        GlobalAveragePooling2D(),  # Flatten the feature maps
+        Dense(512, activation='relu'),  # Fully connected layer
+        Dropout(0.5),  # Regularization
         Dense(train_data_gen.num_classes, activation='softmax')  # Output layer
     ])
     return model
 
-# Load pre-trained model if exists
-model_file = "best_model.keras"
+# Load or create the model
+model_file = "best_model_efficientnet.keras"
 if os.path.exists(model_file):
-    model = load_model(model_file)  # Load the existing model
-    print("Loaded pre-trained model from:", model_file)
+    model = load_model(model_file)
+    print("Loaded pre-trained model.")
 else:
-    model = build_model()  # If no pre-trained model, build a new one
-    print("Building a new model")
+    model = build_model()
+    print("Built a new model.")
 
-# Compile the model with an adaptive learning rate scheduler and gradient clipping
-# Learning rate warmup
-lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=1e-4,  # Lower initial learning rate for stability
-    decay_steps=100000,           # Number of steps before decay
-    decay_rate=0.96,              # Decay rate
-    staircase=True                 # Apply decay in discrete intervals
-)
+# Adaptive learning rate scheduler with warm-up and cosine decay
+def scheduler(epoch, lr):
+    warmup_epochs = 3  # Warm-up period
+    initial_lr = 1e-4  # Base learning rate
+    if epoch < warmup_epochs:
+        return initial_lr * (epoch + 1) / warmup_epochs  # Linear warm-up
+    else:
+        # Cosine decay after warm-up
+        return initial_lr * 0.5 * (1 + tf.math.cos(np.pi * (epoch - warmup_epochs) / (epochs - warmup_epochs)))
 
-# Define the optimizer with gradient clipping
-adaptive_optimizer = Adam(learning_rate=lr_schedule, clipvalue=1.0)  # Apply gradient clipping here
+# Callback for learning rate scheduling
+lr_scheduler = LearningRateScheduler(scheduler)
 
-# Compile the model
+# Compile the model with an adaptive optimizer
+optimizer = AdamW(learning_rate=1e-4, weight_decay=1e-5)  # Adaptive optimizer with weight decay
 model.compile(
-    optimizer=adaptive_optimizer,
+    optimizer=optimizer,
     loss='categorical_crossentropy',
     metrics=['accuracy']
 )
 
-# Define callbacks with stricter early stopping
+# Callbacks for training
 early_stopping = EarlyStopping(
-    monitor='val_loss',  # Stop training if validation loss doesn't improve
-    patience=10,         # Wait for 10 epochs before stopping
-    restore_best_weights=True,  # Restore the best weights
-    min_delta=0.0001  # Set a min_delta to be stricter about stopping
+    monitor='val_accuracy', patience=10, restore_best_weights=True, min_delta=0.01
 )
 
 checkpoint = ModelCheckpoint(
-    "best_model.keras",  # Save the best model to this file
-    save_best_only=True,
-    monitor='val_loss',  # Monitor validation loss
-    mode='min',
-    verbose=1
+    model_file, save_best_only=True, monitor='val_accuracy', mode='max', verbose=1
 )
 
 reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss',  # Reduce learning rate on plateau
-    factor=0.2,          # Reduce LR by a factor of 0.2
-    patience=5,          # Wait for 5 epochs before reducing LR
-    min_lr=1e-6          # Minimum learning rate
+    monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1
 )
 
 # Training parameters
-epochs = 50  # Total number of epochs
-batch_size = 32
-
-# Calculate steps per epoch
-steps_per_epoch = ceil(train_data_gen.samples / batch_size)
-validation_steps = ceil(val_data_gen.samples / batch_size)
+epochs = 20
+steps_per_epoch = ceil(train_data_gen.samples / train_data_gen.batch_size)
+validation_steps = ceil(val_data_gen.samples / val_data_gen.batch_size)
 
 # Train the model
 history = model.fit(
     train_data_gen,
     steps_per_epoch=steps_per_epoch,
-    epochs=epochs,
     validation_data=val_data_gen,
     validation_steps=validation_steps,
-    callbacks=[early_stopping, checkpoint, reduce_lr]
+    epochs=epochs,
+    callbacks=[early_stopping, checkpoint, reduce_lr, lr_scheduler]
 )
 
-# Load the best model saved during training
-model.load_weights("best_model.keras")
-
-# Plot training and validation accuracy/loss
-def plot_history(history):
+# Plot training progress
+def plot_training(history):
     acc = history.history['accuracy']
     val_acc = history.history['val_accuracy']
     loss = history.history['loss']
@@ -164,5 +148,5 @@ def plot_history(history):
     plt.title('Training and Validation Loss')
     plt.show()
 
-# Display training progress
-plot_history(history)
+plot_training(history)
+
