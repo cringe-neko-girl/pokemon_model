@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt  # For plotting training/validation accuracy and
 from math import ceil  # For calculating the number of steps per epoch
 import tensorflow as tf  # For TensorFlow and Keras functionality
 from tensorflow.keras.preprocessing.image import ImageDataGenerator  # For image data generators
-from tensorflow.keras.models import Sequential  # For defining the model
+from tensorflow.keras.models import Sequential, load_model  # For defining and loading the model
 from tensorflow.keras.layers import Dense, Flatten, Dropout, BatchNormalization, Conv2D, MaxPooling2D, Input  # Layers for the CNN
 from tensorflow.keras.optimizers import Adam  # Optimizer for model training
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau  # Callbacks for training
@@ -70,19 +70,40 @@ def build_model():
     ])
     return model
 
-# Build and compile the model
-model = build_model()
-model.compile(
-    optimizer=Adam(learning_rate=1e-3),  # Adam optimizer with a learning rate
-    loss='categorical_crossentropy',    # Loss function for multi-class classification
-    metrics=['accuracy']                # Metric for model evaluation
+# Load pre-trained model if exists
+model_file = "best_model.keras"
+if os.path.exists(model_file):
+    model = load_model(model_file)  # Load the existing model
+    print("Loaded pre-trained model from:", model_file)
+else:
+    model = build_model()  # If no pre-trained model, build a new one
+    print("Building a new model")
+
+# Compile the model with an adaptive learning rate scheduler and gradient clipping
+# Learning rate warmup
+lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate=1e-4,  # Lower initial learning rate for stability
+    decay_steps=100000,           # Number of steps before decay
+    decay_rate=0.96,              # Decay rate
+    staircase=True                 # Apply decay in discrete intervals
 )
 
-# Define callbacks
+# Define the optimizer with gradient clipping
+adaptive_optimizer = Adam(learning_rate=lr_schedule, clipvalue=1.0)  # Apply gradient clipping here
+
+# Compile the model
+model.compile(
+    optimizer=adaptive_optimizer,
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Define callbacks with stricter early stopping
 early_stopping = EarlyStopping(
     monitor='val_loss',  # Stop training if validation loss doesn't improve
     patience=10,         # Wait for 10 epochs before stopping
-    restore_best_weights=True  # Restore the best weights
+    restore_best_weights=True,  # Restore the best weights
+    min_delta=0.0001  # Set a min_delta to be stricter about stopping
 )
 
 checkpoint = ModelCheckpoint(
