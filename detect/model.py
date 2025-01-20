@@ -3,14 +3,15 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logs
 
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, Model, load_model
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, GlobalAveragePooling2D
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, Conv2D, MaxPooling2D, Flatten, BatchNormalization
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.optimizers import Adam, AdamW
-from tensorflow.keras.applications import EfficientNetB0  # Pre-trained model
+from tensorflow.keras.optimizers import AdamW
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler
+
 import matplotlib.pyplot as plt
 from math import ceil
 import numpy as np
+from tqdm import tqdm  
 
 # Paths for training and validation data
 train_dir = "t_data/train"
@@ -37,44 +38,59 @@ image_gen = ImageDataGenerator(
 # Load training data
 train_data_gen = image_gen.flow_from_directory(
     train_dir,
-    target_size=(224, 224),  # Resize images to 224x224 for EfficientNet
-    batch_size=32,
+    target_size=(28, 28), 
+    batch_size=16,
     class_mode='categorical'
 )
 
 # Load validation data
 val_data_gen = image_gen.flow_from_directory(
     val_dir,
-    target_size=(224, 224),
-    batch_size=32,
+    target_size=(28, 28), 
+    batch_size=16,
     class_mode='categorical'
 )
 
-# Build the model using EfficientNetB0 as the base
-def build_model():
-    # Load EfficientNetB0 without the top layer (pre-trained on ImageNet)
-    base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
-    
-    # Freeze base model layers to retain pre-trained features
-    base_model.trainable = False
-    
-    # Add custom classification layers
+# Build the CNN model with Batch Normalization
+def build_cnn_with_batch_norm():
     model = Sequential([
-        base_model,
-        GlobalAveragePooling2D(),  # Flatten the feature maps
-        Dense(512, activation='relu'),  # Fully connected layer
-        Dropout(0.5),  # Regularization
-        Dense(train_data_gen.num_classes, activation='softmax')  # Output layer
+        # Input layer
+        tf.keras.layers.InputLayer(input_shape=(28, 28, 3)),
+        
+        # First convolutional layer
+        Conv2D(32, (3, 3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D(),
+        
+        # Second convolutional layer
+        Conv2D(64, (3, 3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D(),
+        
+        # Third convolutional layer
+        Conv2D(128, (3, 3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D(),
+        
+        # Flatten layer
+        Flatten(),
+        
+        # Dense layer
+        Dense(512, activation='relu'),
+        Dropout(0.5),
+        
+        # Output layer
+        Dense(train_data_gen.num_classes, activation='softmax')
     ])
     return model
 
 # Load or create the model
-model_file = "best_model_efficientnet.keras"
+model_file = "created_models/best_model.keras"
 if os.path.exists(model_file):
     model = load_model(model_file)
     print("Loaded pre-trained model.")
 else:
-    model = build_model()
+    model = build_cnn_with_batch_norm()
     print("Built a new model.")
 
 # Adaptive learning rate scheduler with warm-up and cosine decay
@@ -100,7 +116,7 @@ model.compile(
 
 # Callbacks for training
 early_stopping = EarlyStopping(
-    monitor='val_accuracy', patience=10, restore_best_weights=True, min_delta=0.01
+    monitor='val_accuracy', patience=5, restore_best_weights=True, min_delta=0.01
 )
 
 checkpoint = ModelCheckpoint(
@@ -112,26 +128,55 @@ reduce_lr = ReduceLROnPlateau(
 )
 
 # Training parameters
-epochs = 20
+epochs = 20  
 steps_per_epoch = ceil(train_data_gen.samples / train_data_gen.batch_size)
 validation_steps = ceil(val_data_gen.samples / val_data_gen.batch_size)
 
-# Train the model
-history = model.fit(
-    train_data_gen,
-    steps_per_epoch=steps_per_epoch,
-    validation_data=val_data_gen,
-    validation_steps=validation_steps,
-    epochs=epochs,
-    callbacks=[early_stopping, checkpoint, reduce_lr, lr_scheduler]
-)
+# Initialize tqdm for progress tracking
+progress_bar = tqdm(total=epochs, desc='Epoch Progress', position=0)
+
+# Store training history
+history_list = []
+
+for epoch in range(epochs):
+    print(f"Epoch {epoch + 1}/{epochs}")
+    
+    # Train the model for one epoch and save history
+    history = model.fit(
+        train_data_gen,
+        steps_per_epoch=steps_per_epoch,
+        validation_data=val_data_gen,
+        validation_steps=validation_steps,
+        epochs=1, 
+        callbacks=[early_stopping, checkpoint, reduce_lr, lr_scheduler]
+    )
+    
+    # Add the current epoch's history to the history_list
+    history_list.append(history.history)
+    
+    progress_bar.update(1)
+    
+    # Save the model after each epoch
+    model.save(model_file)
+    print(f"Model saved after epoch {epoch + 1}")
+
+# Close the tqdm progress bar
+progress_bar.close()
 
 # Plot training progress
-def plot_training(history):
-    acc = history.history['accuracy']
-    val_acc = history.history['val_accuracy']
-    loss = history.history['loss']
-    val_loss = history.history['val_loss']
+def plot_training(history_list):
+    acc = []
+    val_acc = []
+    loss = []
+    val_loss = []
+
+    # Collect data from each epoch
+    for history in history_list:
+        acc.extend(history['accuracy'])
+        val_acc.extend(history['val_accuracy'])
+        loss.extend(history['loss'])
+        val_loss.extend(history['val_loss'])
+
     epochs_range = range(len(acc))
 
     plt.figure(figsize=(12, 6))
@@ -148,5 +193,4 @@ def plot_training(history):
     plt.title('Training and Validation Loss')
     plt.show()
 
-plot_training(history)
-
+plot_training(history_list)
